@@ -49,7 +49,7 @@ export function resolveTuiResponsiveLayout(input: {
     showSidebar: !sidebarCollapsed,
     showWindowDots: input.viewportColumns >= COMPACT_HEADER_MAX_COLUMNS,
     showSidebarAlphaBadge: !sidebarCollapsed,
-    sidebarTitle: input.viewportColumns >= COMPACT_HEADER_MAX_COLUMNS ? "T1 Code" : "T1",
+    sidebarTitle: !sidebarCollapsed ? "T1 Code" : "T1",
     showHeaderProjectBadge: input.viewportColumns >= 144,
     showComposerModeLabels,
     showComposerModelLabel,

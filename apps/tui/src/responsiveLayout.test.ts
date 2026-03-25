@@ -82,6 +82,7 @@ describe("resolveTuiResponsiveLayout", () => {
     ).toEqual(
       expect.objectContaining({
         showSidebar: true,
+        sidebarTitle: "T1 Code",
         showComposerModeLabels: true,
         showComposerModelLabel: true,
         showComposerTraitsLabel: false,
@@ -102,6 +103,7 @@ describe("resolveTuiResponsiveLayout", () => {
         sidebarForcedCollapsed: false,
         sidebarCollapsed: false,
         showSidebar: true,
+        sidebarTitle: "T1 Code",
       }),
     );
   });
