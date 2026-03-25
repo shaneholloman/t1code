@@ -119,7 +119,6 @@ import {
   type ResolvedComposerImageAttachment,
 } from "./composerSubmit";
 import { saveClipboardImageToFile } from "./clipboardImage";
-import { resolveClipboardImageSupport } from "./clipboardImage";
 import { KEYBINDING_GUIDE_SECTIONS, isCtrlC, shouldClearComposerOnCtrlC } from "./keyboardBehavior";
 import { createT1Logger } from "./log";
 import { resolveUserMessageBubbleWidth } from "./messageLayout";
@@ -3940,15 +3939,13 @@ export function App({
 
     setImagePasteInFlight(true);
     try {
-      const clipboardSupport = await resolveClipboardImageSupport();
-      if (!clipboardSupport.supported) {
-        setStatus(clipboardSupport.reason);
-        return;
-      }
-
       const filePath = await saveClipboardImageToFile(paths.imagesDir);
       if (!filePath) {
-        setStatus("No image found on clipboard");
+        setStatus(
+          process.platform === "darwin"
+            ? "No image found on clipboard"
+            : "Clipboard images are not supported on this platform",
+        );
         return;
       }
 
@@ -8646,18 +8643,6 @@ export function App({
                             compact={!responsiveLayout.showComposerModeLabels}
                             active={draftInteractionMode === "plan"}
                             onPress={toggleInteractionMode}
-                          />
-                          {responsiveLayout.showComposerDividers ? <FooterDivider /> : null}
-                          <ToolbarButton
-                            icon="󰋊"
-                            label={
-                              responsiveLayout.showComposerModeLabels ? "Clipboard" : undefined
-                            }
-                            compact={!responsiveLayout.showComposerModeLabels}
-                            disabled={imagePasteInFlight || !!activePendingApproval}
-                            onPress={() => {
-                              void attachClipboardImage();
-                            }}
                           />
                           {responsiveLayout.showComposerDividers ? <FooterDivider /> : null}
                           <ToolbarButton
