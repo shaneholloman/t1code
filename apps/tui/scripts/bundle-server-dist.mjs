@@ -8,9 +8,21 @@ const tuiRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(tuiRoot, "../..");
 const serverRoot = path.resolve(repoRoot, "apps/server");
 const serverDistSource = path.resolve(serverRoot, "dist");
-const serverStandaloneDistSource = path.resolve(serverRoot, "dist-standalone");
 const serverDistTarget = path.resolve(tuiRoot, "dist/server");
 const serverClientSource = path.resolve(serverDistSource, "client");
+const nodePtySource = path.resolve(
+  repoRoot,
+  "node_modules/.bun/node-pty@1.1.0/node_modules/node-pty",
+);
+const nodePtyTarget = path.resolve(serverDistTarget, "node_modules/node-pty");
+const nodePtyRuntimeEntries = [
+  "LICENSE",
+  "README.md",
+  "package.json",
+  "lib",
+  "prebuilds",
+  "typings",
+];
 
 function run(command, args, cwd) {
   return new Promise((resolve, reject) => {
@@ -35,8 +47,30 @@ function run(command, args, cwd) {
 }
 
 await run("bun", ["run", "build"], serverRoot);
-await run("bun", ["tsdown", "--config", "tsdown.standalone.config.ts"], serverRoot);
 await fs.rm(serverDistTarget, { recursive: true, force: true });
 await fs.mkdir(path.dirname(serverDistTarget), { recursive: true });
-await fs.cp(serverStandaloneDistSource, serverDistTarget, { recursive: true });
+await run(
+  "bun",
+  [
+    "build",
+    "src/index.ts",
+    "--target=node",
+    "--format=esm",
+    "--splitting",
+    "--packages=bundle",
+    "--external",
+    "node-pty",
+    "--outdir",
+    serverDistTarget,
+  ],
+  serverRoot,
+);
 await fs.cp(serverClientSource, path.resolve(serverDistTarget, "client"), { recursive: true });
+await fs.mkdir(path.dirname(nodePtyTarget), { recursive: true });
+await fs.rm(nodePtyTarget, { recursive: true, force: true });
+await fs.mkdir(nodePtyTarget, { recursive: true });
+for (const entry of nodePtyRuntimeEntries) {
+  await fs.cp(path.resolve(nodePtySource, entry), path.resolve(nodePtyTarget, entry), {
+    recursive: true,
+  });
+}

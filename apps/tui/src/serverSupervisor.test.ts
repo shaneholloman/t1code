@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -155,6 +156,29 @@ describe("startServerSupervisor", () => {
     expect((spawnImpl as any).mock.calls[0][1][0]).toContain("/apps/server/dist/index.mjs");
 
     server.stop();
+  });
+
+  it("prefers the packaged bundled server entry when present", async () => {
+    const spawnImpl = vi.fn(() => new FakeChildProcess() as unknown as ChildProcess);
+    const existsSyncSpy = vi.spyOn(fs, "existsSync").mockReturnValue(true);
+
+    const server = await startServerSupervisor(
+      { homeDir: "/tmp/.t1", authToken: "token-6" },
+      {
+        spawnImpl,
+        reservePort: async () => 43116,
+        waitUntilReady: async () => undefined,
+        env: {
+          NODE_ENV: "production",
+        },
+      },
+    );
+
+    expect((spawnImpl as any).mock.calls[0][0]).toMatch(/(^|\/)node$/);
+    expect((spawnImpl as any).mock.calls[0][1][0]).toContain("/server/index.js");
+
+    server.stop();
+    existsSyncSpy.mockRestore();
   });
 
   it("restarts the child after an unexpected exit", async () => {

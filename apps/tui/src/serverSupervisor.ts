@@ -68,7 +68,7 @@ const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TUI_APP_DIR = path.resolve(THIS_DIR, "..");
 const REPO_ROOT = path.resolve(TUI_APP_DIR, "../..");
 const SERVER_APP_DIR = path.resolve(REPO_ROOT, "apps/server");
-const BUNDLED_SERVER_ENTRY = path.resolve(THIS_DIR, "server", "index.mjs");
+const BUNDLED_SERVER_ENTRY = path.resolve(THIS_DIR, "server", "index.js");
 
 function resolveBundledServerCommand(env: NodeJS.ProcessEnv): string {
   const configured = env.T3CODE_NODE_BIN?.trim();
