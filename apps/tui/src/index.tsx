@@ -68,6 +68,8 @@ if (process.env.T3CODE_HEADLESS === "1") {
   }, timeoutMs);
 } else {
   let shuttingDown = false;
+  let interruptRequestToken = 0;
+  let quitPromptOpen = false;
   const paths = resolveTuiPaths();
   const prefs = await readPrefs(paths);
   const rendererBackgroundColor = prefs.appSettings?.theme === "light" ? "#f5f5f5" : "#171717";
@@ -80,6 +82,19 @@ if (process.env.T3CODE_HEADLESS === "1") {
     backgroundColor: rendererBackgroundColor,
   });
   const root = createRoot(renderer);
+
+  const renderApp = () => {
+    root.render(
+      <App
+        renderer={renderer}
+        interruptRequestToken={interruptRequestToken}
+        onExitPromptOpenChange={(open) => {
+          quitPromptOpen = open;
+        }}
+        onRequestExit={() => shutdown(0)}
+      />,
+    );
+  };
 
   const shutdown = (code = 0, error?: unknown) => {
     if (shuttingDown) return;
@@ -104,7 +119,17 @@ if (process.env.T3CODE_HEADLESS === "1") {
   };
 
   const signalHandlers = [
-    ["SIGINT", () => shutdown(0)],
+    [
+      "SIGINT",
+      () => {
+        if (quitPromptOpen) {
+          shutdown(0);
+          return;
+        }
+        interruptRequestToken += 1;
+        renderApp();
+      },
+    ],
     ["SIGTERM", () => shutdown(0)],
     ["SIGHUP", () => shutdown(0)],
     ["uncaughtException", (error: unknown) => shutdown(1, error)],
@@ -121,5 +146,5 @@ if (process.env.T3CODE_HEADLESS === "1") {
     }
   });
 
-  root.render(<App renderer={renderer} onRequestExit={() => shutdown(0)} />);
+  renderApp();
 }

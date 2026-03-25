@@ -14,12 +14,15 @@ export const KEYBINDING_GUIDE_SECTIONS: readonly KeybindingGuideSection[] = [
     title: "Global",
     items: [
       {
-        shortcut: "Esc",
-        action:
-          "Close the active dialog, overlay, or image preview; otherwise open the quit prompt",
+        shortcut: "Ctrl+C",
+        action: "Open the quit prompt; press Ctrl+C again to confirm exit",
       },
       {
-        shortcut: "Esc / Enter",
+        shortcut: "Esc",
+        action: "Close the active dialog, overlay, or image preview",
+      },
+      {
+        shortcut: "Ctrl+C / Enter",
         action: "Confirm quit from the exit prompt",
       },
     ],
@@ -116,16 +119,16 @@ export const KEYBINDING_GUIDE_SECTIONS: readonly KeybindingGuideSection[] = [
   },
 ] as const;
 
-export function shouldOpenQuitPromptOnEscape(input: {
+export function isCtrlC(input: {
   readonly keyName: string | undefined;
-  readonly hasDismissibleLayer: boolean;
+  readonly ctrl: boolean | undefined;
 }): boolean {
-  return input.keyName === "escape" && !input.hasDismissibleLayer;
+  return input.ctrl === true && input.keyName === "c";
 }
 
 export function shouldClearComposerOnCtrlC(input: {
   readonly keyName: string | undefined;
   readonly ctrl: boolean | undefined;
 }): boolean {
-  return input.ctrl === true && input.keyName === "c";
+  return isCtrlC(input);
 }

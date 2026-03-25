@@ -119,11 +119,7 @@ import {
   type ResolvedComposerImageAttachment,
 } from "./composerSubmit";
 import { saveClipboardImageToFile } from "./clipboardImage";
-import {
-  KEYBINDING_GUIDE_SECTIONS,
-  shouldClearComposerOnCtrlC,
-  shouldOpenQuitPromptOnEscape,
-} from "./keyboardBehavior";
+import { KEYBINDING_GUIDE_SECTIONS, isCtrlC, shouldClearComposerOnCtrlC } from "./keyboardBehavior";
 import { createT1Logger } from "./log";
 import { resolveUserMessageBubbleWidth } from "./messageLayout";
 import { type TuiPrefs, readPrefs, writePrefs } from "./prefs";
@@ -360,6 +356,7 @@ type ConfirmDialogState = {
   body?: string;
   confirmLabel: string;
   escapeBehavior?: "cancel" | "confirm";
+  ctrlCBehavior?: "cancel" | "confirm";
   onConfirm: () => Promise<void>;
 };
 type RenameThreadDialogState = {
@@ -2279,6 +2276,8 @@ function ComposerSendButton(props: {
 
 export function App({
   renderer: _renderer,
+  interruptRequestToken = 0,
+  onExitPromptOpenChange,
   onRequestExit,
 }: {
   renderer: {
@@ -2290,6 +2289,8 @@ export function App({
       blinking?: boolean;
     }) => void;
   };
+  interruptRequestToken?: number;
+  onExitPromptOpenChange?: (open: boolean) => void;
   onRequestExit?: () => void;
 }) {
   const terminalRenderer = _renderer as {
@@ -2447,6 +2448,10 @@ export function App({
   useEffect(() => {
     composerDraftsByThreadIdRef.current = composerDraftsByThreadId;
   }, [composerDraftsByThreadId]);
+
+  useEffect(() => {
+    onExitPromptOpenChange?.(confirmDialog?.confirmLabel === "Quit");
+  }, [confirmDialog, onExitPromptOpenChange]);
 
   useEffect(() => {
     _renderer.setBackgroundColor?.(PALETTE.canvas);
@@ -3502,39 +3507,24 @@ export function App({
     setComposerResetKey((current) => current + 1);
   }
 
-  function clearComposerDraft() {
-    resetComposerTextarea("");
-    setComposerAttachmentDeleteArmed(false);
-    setPathSuggestionEntries([]);
-    setPathSuggestionIndex(0);
-    if (activePendingProgress?.activeQuestion && activePendingUserInput?.requestId) {
-      const questionId = activePendingProgress.activeQuestion.id;
-      const requestId = activePendingUserInput.requestId;
-      setPendingUserInputAnswersByRequestId((current) => ({
-        ...current,
-        [requestId]: {
-          ...current[requestId],
-          [questionId]: {
-            ...current[requestId]?.[questionId],
-            customAnswer: "",
-          },
-        },
-      }));
-    }
-    setStatus("Composer cleared");
-  }
-
-  function requestAppExit() {
+  const requestAppExit = useCallback(() => {
     setConfirmDialog({
       title: "Quit T1 Code?",
-      body: "Press Enter or Escape again to quit. Use Cancel to stay in the session.",
+      body: "Press Ctrl-C again or Enter to quit. Press Escape to stay in the session.",
       confirmLabel: "Quit",
-      escapeBehavior: "confirm",
+      escapeBehavior: "cancel",
+      ctrlCBehavior: "confirm",
       onConfirm: async () => {
         onRequestExit?.();
       },
     });
-  }
+  }, [onRequestExit]);
+
+  useEffect(() => {
+    if (interruptRequestToken > 0) {
+      requestAppExit();
+    }
+  }, [interruptRequestToken, requestAppExit]);
 
   function applyComposerPathMention(entry: ProjectEntry) {
     const trigger = detectTrailingComposerPathTrigger(readComposerValue());
@@ -3939,6 +3929,7 @@ export function App({
     try {
       const filePath = await saveClipboardImageToFile(paths.imagesDir);
       if (!filePath) {
+        setStatus("No image found on clipboard");
         return;
       }
 
@@ -4388,6 +4379,10 @@ export function App({
   }
 
   useKeyboard((key) => {
+    const ctrlCPressed = isCtrlC({
+      keyName: key.name,
+      ctrl: key.ctrl,
+    });
     const isNavUp = key.name === "up" || (key.ctrl && key.name === "k");
     const isNavDown = key.name === "down" || (key.ctrl && key.name === "j");
     const hasDismissibleLayer = Boolean(
@@ -4409,7 +4404,19 @@ export function App({
       sequence: key.sequence,
     });
     if (confirmDialog && key.name === "escape") {
+      key.preventDefault();
       if (confirmDialog.escapeBehavior === "confirm") {
+        const action = confirmDialog.onConfirm;
+        setConfirmDialog(null);
+        void action();
+        return;
+      }
+      setConfirmDialog(null);
+      return;
+    }
+    if (confirmDialog && ctrlCPressed) {
+      key.preventDefault();
+      if (confirmDialog.ctrlCBehavior === "confirm") {
         const action = confirmDialog.onConfirm;
         setConfirmDialog(null);
         void action();
@@ -4484,12 +4491,8 @@ export function App({
       closeSidebarContextMenu();
       return;
     }
-    if (
-      shouldOpenQuitPromptOnEscape({
-        keyName: key.name,
-        hasDismissibleLayer,
-      })
-    ) {
+    if (ctrlCPressed && !hasDismissibleLayer) {
+      key.preventDefault();
       requestAppExit();
       return;
     }
@@ -8348,7 +8351,28 @@ export function App({
                             })
                           ) {
                             key.preventDefault();
-                            clearComposerDraft();
+                            resetComposerTextarea("");
+                            setComposerAttachmentDeleteArmed(false);
+                            setPathSuggestionEntries([]);
+                            setPathSuggestionIndex(0);
+                            if (
+                              activePendingProgress?.activeQuestion &&
+                              activePendingUserInput?.requestId
+                            ) {
+                              const questionId = activePendingProgress.activeQuestion.id;
+                              const requestId = activePendingUserInput.requestId;
+                              setPendingUserInputAnswersByRequestId((current) => ({
+                                ...current,
+                                [requestId]: {
+                                  ...current[requestId],
+                                  [questionId]: {
+                                    ...current[requestId]?.[questionId],
+                                    customAnswer: "",
+                                  },
+                                },
+                              }));
+                            }
+                            setStatus("Composer cleared");
                             return;
                           }
                           if (
