@@ -66,6 +66,7 @@ describe("resolveTuiResponsiveLayout", () => {
         sidebarCollapsed: true,
         sidebarWidth: 0,
         showSidebar: false,
+        showWindowDots: false,
         showComposerModeLabels: true,
         showComposerModelLabel: true,
         showComposerTraitsLabel: true,
@@ -85,6 +86,7 @@ describe("resolveTuiResponsiveLayout", () => {
         sidebarForcedCollapsed: false,
         sidebarCollapsed: false,
         showSidebar: true,
+        showWindowDots: true,
         sidebarTitle: "T1 Code",
       }),
     );
@@ -99,6 +101,7 @@ describe("resolveTuiResponsiveLayout", () => {
     ).toEqual(
       expect.objectContaining({
         showSidebar: true,
+        showWindowDots: true,
         sidebarTitle: "T1 Code",
         showComposerModeLabels: true,
         showComposerModelLabel: true,
@@ -120,6 +123,7 @@ describe("resolveTuiResponsiveLayout", () => {
         sidebarForcedCollapsed: false,
         sidebarCollapsed: false,
         showSidebar: true,
+        showWindowDots: true,
         sidebarTitle: "T1 Code",
       }),
     );
