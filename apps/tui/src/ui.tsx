@@ -134,6 +134,7 @@ import {
 } from "./terminalImages";
 import {
   buildMultiSelectContextMenuItems,
+  buildProjectRemovalConfirmSteps,
   buildProjectContextMenuItems,
   buildThreadContextMenuItems,
   clearThreadSelection,
@@ -4348,18 +4349,26 @@ export function App({
     if (actionId !== "delete") return;
 
     const projectThreads = threadsByProject.get(project.id) ?? [];
-    if (projectThreads.length > 0) {
-      setStatus("Project is not empty");
-      return;
-    }
+    const confirmSteps = buildProjectRemovalConfirmSteps(project.title, projectThreads.length);
+    const promptStep = (stepIndex: number) => {
+      const step = confirmSteps[stepIndex];
+      if (!step) return;
+      promptConfirm({
+        title: step.title,
+        ...(step.body ? { body: step.body } : {}),
+        confirmLabel: step.confirmLabel,
+        onConfirm: async () => {
+          const nextStep = stepIndex + 1;
+          if (nextStep < confirmSteps.length) {
+            promptStep(nextStep);
+            return;
+          }
+          await removeProject(project.id);
+        },
+      });
+    };
 
-    promptConfirm({
-      title: `Remove project "${project.title}"?`,
-      confirmLabel: "Remove",
-      onConfirm: async () => {
-        await removeProject(project.id);
-      },
-    });
+    promptStep(0);
   }
 
   async function promptDeleteFocusedThreads() {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildProjectRemovalConfirmSteps,
   buildProjectContextMenuItems,
   buildThreadContextMenuItems,
   buildMultiSelectContextMenuItems,
@@ -26,6 +27,45 @@ describe("sidebarContextMenu", () => {
   it("matches the web project context menu item", () => {
     expect(buildProjectContextMenuItems()).toEqual([
       { id: "delete", label: "Remove project", destructive: true },
+    ]);
+  });
+
+  it("builds a single-step project removal confirmation when the project is empty", () => {
+    expect(buildProjectRemovalConfirmSteps("Inbox", 0)).toEqual([
+      {
+        title: 'Remove project "Inbox"?',
+        confirmLabel: "Remove",
+      },
+    ]);
+  });
+
+  it("builds a double confirmation flow for projects with threads", () => {
+    expect(buildProjectRemovalConfirmSteps("Inbox", 2)).toEqual([
+      {
+        title: 'Remove project "Inbox"?',
+        body: "Removing this project will also remove 2 threads. Continue to confirm.",
+        confirmLabel: "Continue",
+      },
+      {
+        title: 'Remove project "Inbox" and 2 threads?',
+        body: "This permanently removes the project and all conversation history inside it.",
+        confirmLabel: "Remove project",
+      },
+    ]);
+  });
+
+  it("uses singular thread copy when only one thread will be removed", () => {
+    expect(buildProjectRemovalConfirmSteps("Inbox", 1)).toEqual([
+      {
+        title: 'Remove project "Inbox"?',
+        body: "Removing this project will also remove 1 thread. Continue to confirm.",
+        confirmLabel: "Continue",
+      },
+      {
+        title: 'Remove project "Inbox" and 1 thread?',
+        body: "This permanently removes the project and all conversation history inside it.",
+        confirmLabel: "Remove project",
+      },
     ]);
   });
 

@@ -18,6 +18,12 @@ export type SidebarContextMenuItem = {
   destructive?: boolean;
 };
 
+export type ProjectRemovalConfirmStep = {
+  title: string;
+  body?: string;
+  confirmLabel: string;
+};
+
 type ThreadReadModel = OrchestrationReadModel["threads"][number];
 
 export function buildThreadContextMenuItems(): readonly SidebarContextMenuItem[] {
@@ -32,6 +38,34 @@ export function buildThreadContextMenuItems(): readonly SidebarContextMenuItem[]
 
 export function buildProjectContextMenuItems(): readonly SidebarContextMenuItem[] {
   return [{ id: "delete", label: "Remove project", destructive: true }];
+}
+
+export function buildProjectRemovalConfirmSteps(
+  projectTitle: string,
+  threadCount: number,
+): readonly ProjectRemovalConfirmStep[] {
+  if (threadCount <= 0) {
+    return [
+      {
+        title: `Remove project "${projectTitle}"?`,
+        confirmLabel: "Remove",
+      },
+    ];
+  }
+
+  const threadLabel = `${threadCount} thread${threadCount === 1 ? "" : "s"}`;
+  return [
+    {
+      title: `Remove project "${projectTitle}"?`,
+      body: `Removing this project will also remove ${threadLabel}. Continue to confirm.`,
+      confirmLabel: "Continue",
+    },
+    {
+      title: `Remove project "${projectTitle}" and ${threadLabel}?`,
+      body: "This permanently removes the project and all conversation history inside it.",
+      confirmLabel: "Remove project",
+    },
+  ];
 }
 
 export function buildMultiSelectContextMenuItems(count: number): readonly SidebarContextMenuItem[] {
