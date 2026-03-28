@@ -34,6 +34,9 @@ export interface PersistedComposerDraft {
 export interface PersistedDraftThreadState {
   readonly id: string;
   readonly projectId: string;
+  readonly branch?: string | null;
+  readonly worktreePath?: string | null;
+  readonly envMode?: "local" | "worktree";
 }
 
 export interface TuiPrefs {

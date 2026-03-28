@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type {
   InputRenderable,
@@ -170,7 +171,16 @@ type FocusArea =
   | "diff"
   | "settings";
 type MainView = "thread" | "settings" | "keybindings";
-type OverlayMenu = null | "model" | "traits" | "settings-select" | "sidebar-sort" | "git-actions";
+type ThreadEnvMode = "local" | "worktree";
+type OverlayMenu =
+  | null
+  | "model"
+  | "traits"
+  | "settings-select"
+  | "sidebar-sort"
+  | "git-actions"
+  | "composer-env"
+  | "composer-branch";
 type SettingsSelectKind =
   | "theme"
   | "timestamp-format"
@@ -210,6 +220,9 @@ type PendingSendPreview = {
 type DraftThreadState = {
   id: string;
   projectId: string;
+  branch: string | null;
+  worktreePath: string | null;
+  envMode: ThreadEnvMode;
 };
 type ComposerDraftState = {
   text: string;
@@ -257,6 +270,20 @@ type TuiGitMenuItem = {
   readonly kind: "action" | "pull" | "open_pr";
   readonly action?: GitStackedAction;
 };
+type ComposerEnvMenuItem = {
+  readonly id: ThreadEnvMode;
+  readonly label: string;
+  readonly icon: string;
+  readonly selected: boolean;
+  readonly onSelect: () => void;
+};
+type ComposerBranchMenuItem = {
+  readonly id: string;
+  readonly label: string;
+  readonly branch: GitListBranchesResult["branches"][number];
+  readonly selected: boolean;
+  readonly trailingLabel?: string;
+};
 const OPEN_TUI_DIFF_METADATA_PREFIXES = [
   "diff --git ",
   "index ",
@@ -268,6 +295,15 @@ const OPEN_TUI_DIFF_METADATA_PREFIXES = [
   "rename from ",
   "rename to ",
 ] as const;
+const WORKTREE_BRANCH_PREFIX = "t3code";
+const ENV_MODE_OPTIONS: ReadonlyArray<{
+  readonly value: ThreadEnvMode;
+  readonly label: string;
+  readonly icon: string;
+}> = [
+  { value: "local", label: "Local", icon: "󰉋" },
+  { value: "worktree", label: "New worktree", icon: "󰙅" },
+];
 
 function cloneDraftAttachment(
   attachment: DraftComposerImageAttachment,
@@ -1033,6 +1069,158 @@ function stripMentionTokensFromText(input: string): { mentions: ComposerMention[
 
 function composerTraitsIcon(provider: ProviderKind): string {
   return provider === "claudeAgent" ? "󰚩" : "󰔟";
+}
+
+function buildTemporaryWorktreeBranchName(): string {
+  return `${WORKTREE_BRANCH_PREFIX}/${randomUUID().slice(0, 8).toLowerCase()}`;
+}
+
+function createDefaultDraftThreadState(
+  projectId: string,
+  envMode: ThreadEnvMode,
+  branch: string | null = null,
+): DraftThreadState {
+  return {
+    id: `${DRAFT_THREAD_ID_PREFIX}${newThreadId()}`,
+    projectId,
+    branch,
+    worktreePath: null,
+    envMode,
+  };
+}
+
+function resolveEffectiveThreadEnvMode(input: {
+  activeWorktreePath: string | null;
+  hasServerThread: boolean;
+  draftThreadEnvMode: ThreadEnvMode | undefined;
+  fallbackEnvMode: ThreadEnvMode;
+}): ThreadEnvMode {
+  const { activeWorktreePath, hasServerThread, draftThreadEnvMode, fallbackEnvMode } = input;
+  return activeWorktreePath || (!hasServerThread && draftThreadEnvMode === "worktree")
+    ? "worktree"
+    : (draftThreadEnvMode ?? fallbackEnvMode);
+}
+
+function resolveDraftEnvModeAfterBranchChange(input: {
+  nextWorktreePath: string | null;
+  currentWorktreePath: string | null;
+  effectiveEnvMode: ThreadEnvMode;
+}): ThreadEnvMode {
+  const { nextWorktreePath, currentWorktreePath, effectiveEnvMode } = input;
+  if (nextWorktreePath) {
+    return "worktree";
+  }
+  if (effectiveEnvMode === "worktree" && !currentWorktreePath) {
+    return "worktree";
+  }
+  return "local";
+}
+
+function resolveComposerBranchValue(input: {
+  envMode: ThreadEnvMode;
+  activeWorktreePath: string | null;
+  activeThreadBranch: string | null;
+  currentGitBranch: string | null;
+}): string | null {
+  const { envMode, activeWorktreePath, activeThreadBranch, currentGitBranch } = input;
+  if (envMode === "worktree" && !activeWorktreePath) {
+    return activeThreadBranch ?? currentGitBranch;
+  }
+  return currentGitBranch ?? activeThreadBranch;
+}
+
+function deriveLocalBranchNameFromRemoteRef(branchName: string): string {
+  const firstSeparatorIndex = branchName.indexOf("/");
+  if (firstSeparatorIndex <= 0 || firstSeparatorIndex === branchName.length - 1) {
+    return branchName;
+  }
+  return branchName.slice(firstSeparatorIndex + 1);
+}
+
+function deriveLocalBranchNameCandidatesFromRemoteRef(
+  branchName: string,
+  remoteName?: string,
+): ReadonlyArray<string> {
+  const candidates = new Set<string>();
+  const firstSlashCandidate = deriveLocalBranchNameFromRemoteRef(branchName);
+  if (firstSlashCandidate.length > 0) {
+    candidates.add(firstSlashCandidate);
+  }
+
+  if (remoteName) {
+    const remotePrefix = `${remoteName}/`;
+    if (branchName.startsWith(remotePrefix) && branchName.length > remotePrefix.length) {
+      candidates.add(branchName.slice(remotePrefix.length));
+    }
+  }
+
+  return [...candidates];
+}
+
+function dedupeRemoteBranchesWithLocalMatches(
+  branches: ReadonlyArray<GitListBranchesResult["branches"][number]>,
+): ReadonlyArray<GitListBranchesResult["branches"][number]> {
+  const localBranchNames = new Set(
+    branches.filter((branch) => !branch.isRemote).map((branch) => branch.name),
+  );
+
+  return branches.filter((branch) => {
+    if (!branch.isRemote) {
+      return true;
+    }
+    if (branch.remoteName !== "origin") {
+      return true;
+    }
+    const localBranchCandidates = deriveLocalBranchNameCandidatesFromRemoteRef(
+      branch.name,
+      branch.remoteName,
+    );
+    return !localBranchCandidates.some((candidate) => localBranchNames.has(candidate));
+  });
+}
+
+function resolveBranchSelectionTarget(input: {
+  activeProjectCwd: string;
+  activeWorktreePath: string | null;
+  branch: Pick<GitListBranchesResult["branches"][number], "isDefault" | "worktreePath">;
+}): {
+  checkoutCwd: string;
+  nextWorktreePath: string | null;
+  reuseExistingWorktree: boolean;
+} {
+  const { activeProjectCwd, activeWorktreePath, branch } = input;
+
+  if (branch.worktreePath) {
+    return {
+      checkoutCwd: branch.worktreePath,
+      nextWorktreePath: branch.worktreePath === activeProjectCwd ? null : branch.worktreePath,
+      reuseExistingWorktree: true,
+    };
+  }
+
+  const nextWorktreePath =
+    activeWorktreePath !== null && branch.isDefault ? null : activeWorktreePath;
+
+  return {
+    checkoutCwd: nextWorktreePath ?? activeProjectCwd,
+    nextWorktreePath,
+    reuseExistingWorktree: false,
+  };
+}
+
+function branchTriggerLabel(input: {
+  activeWorktreePath: string | null;
+  effectiveEnvMode: ThreadEnvMode;
+  branch: string | null;
+}): string {
+  const { activeWorktreePath, effectiveEnvMode, branch } = input;
+  if (!branch) {
+    return "Select branch";
+  }
+  if (effectiveEnvMode === "worktree" && !activeWorktreePath) {
+    return `From ${branch}`;
+  }
+  return branch;
 }
 
 function resolvePreferredEditor(availableEditors: readonly EditorId[]): EditorId | null {
@@ -1903,7 +2091,9 @@ function ToolbarButton(props: {
         justifyContent: props.justifyContent ?? "center",
         flexShrink: 0,
         ...(isBare
-          ? { width: props.width ?? 3 }
+          ? props.label
+            ? {}
+            : { width: props.width ?? 3 }
           : props.label
             ? {}
             : props.compact
@@ -2071,10 +2261,11 @@ function PopupRow(props: {
       }}
     >
       <text content={props.icon} style={{ fg: iconColor, marginRight: 1 }} />
-      <text content={props.label} style={{ fg: labelColor }} />
+      <box style={{ flexGrow: 1, flexShrink: 1, overflow: "hidden", height: 1 }}>
+        <text content={props.label} style={{ fg: labelColor }} />
+      </box>
       {props.trailingLabel ? (
         <>
-          <box style={{ flexGrow: 1 }} />
           <text content={props.trailingLabel} style={{ fg: PALETTE.subtle }} />
         </>
       ) : null}
@@ -2323,6 +2514,7 @@ export function App({
   const composerValueRef = useRef("");
   const deferredComposerSyncRef = useRef(createDeferredComposerSyncState());
   const timelineScrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const composerBranchScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const [imagePasteInFlight, setImagePasteInFlight] = useState(false);
   const sendInFlightRef = useRef(false);
   const interruptInFlightRef = useRef(false);
@@ -2349,6 +2541,7 @@ export function App({
   const [draftThreadsByProjectId, setDraftThreadsByProjectId] = useState<
     Readonly<Record<string, DraftThreadState>>
   >({});
+  const draftThreadsByProjectIdRef = useRef<Readonly<Record<string, DraftThreadState>>>({});
   const [composerDraftsByThreadId, setComposerDraftsByThreadId] = useState<
     Readonly<Record<string, ComposerDraftState>>
   >({});
@@ -2381,6 +2574,8 @@ export function App({
   const [modelSubmenuOpen, setModelSubmenuOpen] = useState(false);
   const [modelMenuIndex, setModelMenuIndex] = useState(0);
   const [gitMenuIndex, setGitMenuIndex] = useState(0);
+  const [composerEnvMenuIndex, setComposerEnvMenuIndex] = useState(0);
+  const [composerBranchMenuIndex, setComposerBranchMenuIndex] = useState(0);
   const [settingsSelectKind, setSettingsSelectKind] = useState<SettingsSelectKind>("git-model");
   const [settingsSelectIndex, setSettingsSelectIndex] = useState(0);
   const [sidebarSortIndex, setSidebarSortIndex] = useState(0);
@@ -2450,6 +2645,10 @@ export function App({
   DIFF_SYNTAX = buildDiffSyntax(PALETTE);
 
   useEffect(() => {
+    draftThreadsByProjectIdRef.current = draftThreadsByProjectId;
+  }, [draftThreadsByProjectId]);
+
+  useEffect(() => {
     composerDraftsByThreadIdRef.current = composerDraftsByThreadId;
   }, [composerDraftsByThreadId]);
 
@@ -2507,7 +2706,20 @@ export function App({
         setLocallyVisitedThreads(prefs.threadLastVisitedAtById);
       }
       if (prefs.draftThreadsByProjectId) {
-        setDraftThreadsByProjectId(prefs.draftThreadsByProjectId);
+        setDraftThreadsByProjectId(
+          Object.fromEntries(
+            Object.entries(prefs.draftThreadsByProjectId).map(([projectId, draftThread]) => [
+              projectId,
+              {
+                id: draftThread.id,
+                projectId: draftThread.projectId,
+                branch: draftThread.branch ?? null,
+                worktreePath: draftThread.worktreePath ?? null,
+                envMode: draftThread.envMode ?? "local",
+              },
+            ]),
+          ),
+        );
       }
       if (prefs.composerDraftsByThreadId) {
         setComposerDraftsByThreadId(
@@ -2836,8 +3048,23 @@ export function App({
     ? null
     : (threads.find((thread) => thread.id === activeThreadId) ?? null);
   const activeThreadIsRunning = activeThread?.session?.status === "running";
-  const gitCwd = activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? null;
-  const composerSearchCwd = activeThread?.worktreePath ?? activeProject?.workspaceRoot ?? null;
+  const activeThreadBranch = activeThread?.branch ?? activeDraftThread?.branch ?? null;
+  const activeWorktreePath = activeThread?.worktreePath ?? activeDraftThread?.worktreePath ?? null;
+  const activeProjectCwd = activeProject?.workspaceRoot ?? null;
+  const hasServerThread = activeThread !== null;
+  const effectiveThreadEnvMode = resolveEffectiveThreadEnvMode({
+    activeWorktreePath,
+    hasServerThread,
+    draftThreadEnvMode: activeDraftThread?.envMode,
+    fallbackEnvMode: appSettings.defaultThreadEnvMode,
+  });
+  const envLocked = Boolean(
+    activeThread &&
+    (activeThread.messages.length > 0 ||
+      (activeThread.session !== null && activeThread.session.status !== "stopped")),
+  );
+  const gitCwd = activeWorktreePath ?? activeProjectCwd ?? null;
+  const composerSearchCwd = activeWorktreePath ?? activeProjectCwd ?? null;
   const workEntries = activeThread
     ? deriveWorkLogEntries(activeThread.activities, activeThread.latestTurn?.turnId ?? undefined)
     : [];
@@ -2947,7 +3174,22 @@ export function App({
     appSettings.textGenerationModel ?? DEFAULT_GIT_TEXT_GENERATION_MODEL;
   const isGitRepo = gitBranchList?.isRepo ?? true;
   const hasOriginRemote = gitBranchList?.hasOriginRemote ?? false;
+  const visibleGitBranches = useMemo(
+    () => dedupeRemoteBranchesWithLocalMatches(gitBranchList?.branches ?? []),
+    [gitBranchList?.branches],
+  );
   const currentBranch = gitBranchList?.branches.find((branch) => branch.current)?.name ?? null;
+  const resolvedComposerBranch = resolveComposerBranchValue({
+    envMode: effectiveThreadEnvMode,
+    activeWorktreePath,
+    activeThreadBranch,
+    currentGitBranch: gitStatus?.branch ?? currentBranch,
+  });
+  const composerBranchLabel = branchTriggerLabel({
+    activeWorktreePath,
+    effectiveEnvMode: effectiveThreadEnvMode,
+    branch: resolvedComposerBranch,
+  });
   const isGitStatusOutOfSync =
     !!gitStatus?.branch && !!currentBranch && gitStatus.branch !== currentBranch;
   const gitStatusForActions = isGitStatusOutOfSync ? null : gitStatus;
@@ -3010,6 +3252,48 @@ export function App({
         : "Dark";
   const selectedThreadEnvLabel =
     appSettings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local";
+  const composerEnvMenuItems: ComposerEnvMenuItem[] = ENV_MODE_OPTIONS.map((option) => ({
+    id: option.value,
+    label: option.label,
+    icon: option.icon,
+    selected: effectiveThreadEnvMode === option.value,
+    onSelect: () => {
+      void applyComposerEnvMode(option.value);
+    },
+  }));
+  const composerBranchMenuItems = useMemo<ComposerBranchMenuItem[]>(
+    () =>
+      visibleGitBranches.map((branch) => {
+        const hasSecondaryWorktree =
+          !!branch.worktreePath && branch.worktreePath !== activeProjectCwd;
+        return {
+          id: branch.name,
+          label: branch.name,
+          branch,
+          selected: branch.name === resolvedComposerBranch,
+          ...(((branch.current
+            ? "current"
+            : hasSecondaryWorktree
+              ? "worktree"
+              : branch.isRemote
+                ? "remote"
+                : branch.isDefault
+                  ? "default"
+                  : undefined) as string | undefined)
+            ? {
+                trailingLabel: branch.current
+                  ? "current"
+                  : hasSecondaryWorktree
+                    ? "worktree"
+                    : branch.isRemote
+                      ? "remote"
+                      : "default",
+              }
+            : {}),
+        };
+      }),
+    [activeProjectCwd, resolvedComposerBranch, visibleGitBranches],
+  );
   const selectedCustomModelProviderLabel =
     MODEL_PROVIDER_SETTINGS.find((entry) => entry.provider === selectedCustomModelProvider)
       ?.title ?? "Codex";
@@ -4742,6 +5026,52 @@ export function App({
         return;
       }
     }
+    if (overlayMenu === "composer-env") {
+      if (isNavUp) {
+        setComposerEnvMenuIndex((current) => Math.max(0, current - 1));
+        return;
+      }
+      if (isNavDown) {
+        setComposerEnvMenuIndex((current) =>
+          Math.min(composerEnvMenuItems.length - 1, current + 1),
+        );
+        return;
+      }
+      if (
+        key.name === "return" ||
+        key.name === "enter" ||
+        key.name === "kpenter" ||
+        key.name === "linefeed"
+      ) {
+        composerEnvMenuItems[composerEnvMenuIndex]?.onSelect();
+        return;
+      }
+    }
+    if (overlayMenu === "composer-branch") {
+      if (isNavUp) {
+        setComposerBranchMenuIndex((current) => Math.max(0, current - 1));
+        return;
+      }
+      if (isNavDown) {
+        setComposerBranchMenuIndex((current) =>
+          Math.min(composerBranchMenuItems.length - 1, current + 1),
+        );
+        return;
+      }
+      if (
+        key.name === "return" ||
+        key.name === "enter" ||
+        key.name === "kpenter" ||
+        key.name === "linefeed"
+      ) {
+        key.preventDefault();
+        const selected = composerBranchMenuItems[composerBranchMenuIndex];
+        if (selected) {
+          void selectComposerBranch(selected);
+        }
+        return;
+      }
+    }
     if (overlayMenu === "traits") {
       if (traitsMenuItems.length === 0) {
         setOverlayMenu(null);
@@ -5152,10 +5482,13 @@ export function App({
 
   function openDraftThread(projectId: string): string {
     persistComposerDraftForThread(activeThreadId, readComposerValue());
-    const existingDraft = draftThreadsByProjectId[projectId] ?? {
-      id: `${DRAFT_THREAD_ID_PREFIX}${newThreadId()}`,
-      projectId,
-    };
+    const existingDraft =
+      draftThreadsByProjectId[projectId] ??
+      createDefaultDraftThreadState(
+        projectId,
+        appSettings.defaultThreadEnvMode,
+        currentBranch ?? null,
+      );
     setDraftThreadsByProjectId((current) => ({
       ...current,
       [projectId]: existingDraft,
@@ -5172,7 +5505,11 @@ export function App({
     return existingDraft.id;
   }
 
-  async function createThread(projectId: string, title = DEFAULT_THREAD_TITLE): Promise<string> {
+  async function createThread(
+    projectId: string,
+    title = DEFAULT_THREAD_TITLE,
+    threadContext?: { branch: string | null; worktreePath: string | null },
+  ): Promise<string> {
     logger.log("thread.create", { projectId, title });
     const threadId = newThreadId();
     setPendingCreatedThreadId(threadId);
@@ -5185,8 +5522,8 @@ export function App({
       model: draftModel,
       runtimeMode: draftRuntimeMode,
       interactionMode: draftInteractionMode,
-      branch: null,
-      worktreePath: null,
+      branch: threadContext?.branch ?? null,
+      worktreePath: threadContext?.worktreePath ?? null,
       createdAt: nowIso(),
     });
     setSelectedProjectId(projectId);
@@ -5711,9 +6048,57 @@ export function App({
             }
           : undefined;
 
+      let nextThreadBranch = activeThreadBranch;
+      let nextThreadWorktreePath = activeWorktreePath;
+      const shouldCreateWorktree =
+        !activeThread &&
+        effectiveThreadEnvMode === "worktree" &&
+        nextThreadWorktreePath === null &&
+        activeProjectCwd !== null;
+      if (shouldCreateWorktree) {
+        if (!api || !activeProjectCwd) {
+          setStatus("Worktree unavailable");
+          return;
+        }
+        if (!nextThreadBranch) {
+          setStatus("Select a base branch before sending in New worktree mode");
+          return;
+        }
+        try {
+          const result = await api.git.createWorktree({
+            cwd: activeProjectCwd,
+            branch: nextThreadBranch,
+            newBranch: buildTemporaryWorktreeBranchName(),
+            path: null,
+          });
+          nextThreadBranch = result.worktree.branch;
+          nextThreadWorktreePath = result.worktree.path;
+          if (activeProjectId) {
+            upsertDraftThreadContext(activeProjectId, (current) => ({
+              ...current,
+              branch: result.worktree.branch,
+              worktreePath: result.worktree.path,
+              envMode: "worktree",
+            }));
+          }
+          await refreshGitState();
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : "Failed to create worktree");
+          logger.log("composer.worktreeCreateFailed", {
+            branch: nextThreadBranch,
+            cwd: activeProjectCwd,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
+      }
+
       let threadId: string | undefined = activeThread?.id;
       if (!threadId) {
-        threadId = await createThread(projectId);
+        threadId = await createThread(projectId, DEFAULT_THREAD_TITLE, {
+          branch: nextThreadBranch,
+          worktreePath: nextThreadWorktreePath,
+        });
       }
 
       const messageId = newMessageId();
@@ -5870,6 +6255,97 @@ export function App({
     applyDraftInteractionMode(draftInteractionMode === "default" ? "plan" : "default");
   }
 
+  function upsertDraftThreadContext(
+    projectId: string,
+    updater: (current: DraftThreadState) => DraftThreadState,
+  ): DraftThreadState {
+    const existing =
+      draftThreadsByProjectIdRef.current[projectId] ??
+      createDefaultDraftThreadState(projectId, appSettings.defaultThreadEnvMode);
+    const next = updater(existing);
+    setDraftThreadsByProjectId((current) => ({
+      ...current,
+      [projectId]: next,
+    }));
+    return next;
+  }
+
+  async function applyThreadBranchContext(branch: string | null, worktreePath: string | null) {
+    if (activeThread) {
+      if (
+        api &&
+        activeThread.session &&
+        worktreePath !== activeWorktreePath &&
+        activeThread.session.status !== "stopped"
+      ) {
+        try {
+          await dispatch({
+            type: "thread.session.stop",
+            commandId: newCommandId(),
+            threadId: activeThread.id as never,
+            createdAt: nowIso(),
+          });
+        } catch (error) {
+          logger.log("thread.sessionStopFailed", {
+            threadId: activeThread.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      await dispatch({
+        type: "thread.meta.update",
+        commandId: newCommandId(),
+        threadId: activeThread.id as never,
+        branch,
+        worktreePath,
+      });
+      setStatus(branch ? `Branch ${branch}` : "Branch updated");
+      return;
+    }
+
+    if (!activeProjectId) {
+      return;
+    }
+    upsertDraftThreadContext(activeProjectId, (current) => ({
+      ...current,
+      branch,
+      worktreePath,
+      envMode: resolveDraftEnvModeAfterBranchChange({
+        nextWorktreePath: worktreePath,
+        currentWorktreePath: current.worktreePath,
+        effectiveEnvMode: effectiveThreadEnvMode,
+      }),
+    }));
+    setStatus(branch ? `Branch ${branch}` : "Branch updated");
+  }
+
+  async function applyComposerEnvMode(nextMode: ThreadEnvMode) {
+    if (envLocked || activeWorktreePath) {
+      return;
+    }
+    setOverlayMenu(null);
+    setOverlayAnchor(null);
+    if (!activeProjectId) {
+      updateAppSettings({ defaultThreadEnvMode: nextMode });
+      setStatus(
+        nextMode === "worktree" ? "New threads use worktrees" : "New threads use local mode",
+      );
+      return;
+    }
+    const nextDraft = upsertDraftThreadContext(activeProjectId, (current) => ({
+      ...current,
+      envMode: nextMode,
+      worktreePath: nextMode === "local" ? null : current.worktreePath,
+      branch: current.branch ?? currentBranch ?? null,
+    }));
+    setSelectedThreadId(nextDraft.id);
+    setFocusArea("composer");
+    setStatus(nextMode === "worktree" ? "New worktree mode" : "Local mode");
+    setTimeout(() => {
+      composerRef.current?.focus();
+    }, 0);
+  }
+
   function closeOverlayMenu() {
     setOverlayMenu((current) => {
       if (current !== null) {
@@ -5934,6 +6410,46 @@ export function App({
         provider: draftProvider,
         model: draftModel,
       });
+      return next;
+    });
+  }
+
+  function toggleComposerEnvMenu(event?: SidebarMouseEvent) {
+    if (!activeProjectId) {
+      return;
+    }
+    setFocusArea("controls");
+    closeSidebarContextMenu();
+    setOverlayMenu((current) => {
+      const next = current === "composer-env" ? null : "composer-env";
+      if (next === "composer-env") {
+        setOverlayAnchor({ x: event?.x ?? null, y: event?.y ?? null });
+        const selectedIndex = Math.max(
+          composerEnvMenuItems.findIndex((item) => item.selected),
+          0,
+        );
+        setComposerEnvMenuIndex(selectedIndex);
+      } else {
+        setOverlayAnchor(null);
+      }
+      return next;
+    });
+  }
+
+  function toggleComposerBranchMenu(event?: SidebarMouseEvent) {
+    if (!activeProjectCwd || !gitCwd || !isGitRepo) {
+      return;
+    }
+    setFocusArea("controls");
+    closeSidebarContextMenu();
+    setOverlayMenu((current) => {
+      const next = current === "composer-branch" ? null : "composer-branch";
+      if (next === "composer-branch") {
+        setOverlayAnchor({ x: event?.x ?? null, y: event?.y ?? null });
+        setComposerBranchMenuIndex(0);
+      } else {
+        setOverlayAnchor(null);
+      }
       return next;
     });
   }
@@ -6044,6 +6560,18 @@ export function App({
   }, [gitMenuItems.length]);
 
   useEffect(() => {
+    setComposerEnvMenuIndex((current) =>
+      Math.min(current, Math.max(composerEnvMenuItems.length - 1, 0)),
+    );
+  }, [composerEnvMenuItems.length]);
+
+  useEffect(() => {
+    setComposerBranchMenuIndex((current) =>
+      Math.min(current, Math.max(composerBranchMenuItems.length - 1, 0)),
+    );
+  }, [composerBranchMenuItems.length]);
+
+  useEffect(() => {
     if (overlayMenu !== "git-actions") {
       return;
     }
@@ -6052,6 +6580,77 @@ export function App({
       setOverlayAnchor(null);
     }
   }, [gitCwd, isGitRepo, overlayMenu]);
+
+  useEffect(() => {
+    if (overlayMenu === "composer-env" && !activeProjectId) {
+      setOverlayMenu(null);
+      setOverlayAnchor(null);
+    }
+  }, [activeProjectId, overlayMenu]);
+
+  useEffect(() => {
+    if (overlayMenu === "composer-branch" && (!activeProjectCwd || !gitCwd || !isGitRepo)) {
+      setOverlayMenu(null);
+      setOverlayAnchor(null);
+    }
+  }, [activeProjectCwd, gitCwd, isGitRepo, overlayMenu]);
+
+  useEffect(() => {
+    if (overlayMenu !== "composer-branch") {
+      return;
+    }
+    const scrollbox = composerBranchScrollRef.current;
+    if (!scrollbox) {
+      return;
+    }
+    process.nextTick(() => {
+      const nextScrollTop = Math.max(
+        0,
+        Math.min(
+          composerBranchMenuIndex,
+          Math.max(scrollbox.scrollHeight - scrollbox.viewport.height, 0),
+        ),
+      );
+      scrollbox.scrollTo({
+        x: scrollbox.scrollLeft,
+        y: nextScrollTop,
+      });
+    });
+  }, [composerBranchMenuIndex, composerBranchMenuItems.length, overlayMenu]);
+
+  useEffect(() => {
+    if (
+      effectiveThreadEnvMode !== "worktree" ||
+      activeWorktreePath ||
+      activeThreadBranch ||
+      !currentBranch ||
+      activeThread ||
+      !activeProjectId
+    ) {
+      return;
+    }
+    setDraftThreadsByProjectId((current) => {
+      const existing =
+        current[activeProjectId] ??
+        createDefaultDraftThreadState(activeProjectId, appSettings.defaultThreadEnvMode);
+      return {
+        ...current,
+        [activeProjectId]: {
+          ...existing,
+          branch: existing.branch ?? currentBranch,
+          envMode: "worktree",
+        },
+      };
+    });
+  }, [
+    activeProjectId,
+    appSettings.defaultThreadEnvMode,
+    activeThread,
+    activeThreadBranch,
+    activeWorktreePath,
+    currentBranch,
+    effectiveThreadEnvMode,
+  ]);
 
   function toggleGitActionsMenu(event?: SidebarMouseEvent) {
     if (!gitCwd || !isGitRepo) {
@@ -6073,6 +6672,61 @@ export function App({
       });
       return next;
     });
+  }
+
+  async function selectComposerBranch(item: ComposerBranchMenuItem) {
+    if (!api || !activeProjectCwd || !gitCwd || !isGitRepo) {
+      return;
+    }
+    const { branch } = item;
+    const isSelectingWorktreeBase =
+      effectiveThreadEnvMode === "worktree" && !envLocked && !activeWorktreePath;
+
+    setOverlayMenu(null);
+    setOverlayAnchor(null);
+
+    if (isSelectingWorktreeBase) {
+      await applyThreadBranchContext(branch.name, null);
+      setFocusArea("composer");
+      return;
+    }
+
+    const selectionTarget = resolveBranchSelectionTarget({
+      activeProjectCwd,
+      activeWorktreePath,
+      branch,
+    });
+
+    if (selectionTarget.reuseExistingWorktree) {
+      await applyThreadBranchContext(branch.name, selectionTarget.nextWorktreePath);
+      setFocusArea("composer");
+      return;
+    }
+
+    try {
+      const selectedBranchName = branch.isRemote
+        ? deriveLocalBranchNameFromRemoteRef(branch.name)
+        : branch.name;
+      await api.git.checkout({ cwd: selectionTarget.checkoutCwd, branch: branch.name });
+      let nextBranchName = selectedBranchName;
+      if (branch.isRemote) {
+        const status = await api.git.status({ cwd: selectionTarget.checkoutCwd }).catch(() => null);
+        if (status?.branch) {
+          nextBranchName = status.branch;
+        }
+      }
+      await applyThreadBranchContext(nextBranchName, selectionTarget.nextWorktreePath);
+      await refreshGitState();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Branch checkout failed");
+      logger.log("composer.branchSelectFailed", {
+        branch: branch.name,
+        cwd: selectionTarget.checkoutCwd,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setFocusArea("composer");
+    }
   }
 
   async function runGitStackedAction(action: GitStackedAction) {
@@ -6501,6 +7155,26 @@ export function App({
     : MODEL_POPUP_PROVIDER_COLUMN_WIDTH + 2;
   const settingsSelectMenuHeight = Math.min(Math.max(settingsSelectItems.length, 1), 6);
   const settingsSelectPopupHeight = 3 + settingsSelectMenuHeight;
+  const composerEnvPopupWidth = Math.max(
+    16,
+    composerEnvMenuItems.reduce((width, item) => Math.max(width, item.label.length + 8), 16),
+  );
+  const composerEnvPopupHeight = composerEnvMenuItems.length + 2;
+  const composerBranchPopupWidth = Math.max(
+    42,
+    composerBranchMenuItems.reduce(
+      (width, item) =>
+        Math.max(
+          width,
+          Math.min(truncateTitleForDisplay(item.label, 28).length, 28) +
+            (item.trailingLabel?.length ?? 0) +
+            10,
+        ),
+      42,
+    ),
+  );
+  const composerBranchVisibleRowCount = Math.min(Math.max(composerBranchMenuItems.length, 1), 10);
+  const composerBranchPopupHeight = composerBranchVisibleRowCount + 2;
   const gitPopupWidth = Math.max(
     24,
     gitMenuItems.reduce((width, item) => Math.max(width, item.label.length + 8), 24),
@@ -6548,6 +7222,7 @@ export function App({
     (process.stdout.rows ?? Number(process.env.T3CODE_HEADLESS_HEIGHT ?? 0)) || 48;
   const viewportColumns =
     (process.stdout.columns ?? Number(process.env.T3CODE_HEADLESS_WIDTH ?? 0)) || 160;
+  const mainPanelLeft = responsiveLayout.showSidebar ? responsiveLayout.sidebarWidth + 1 : 0;
   const imagePreviewModalWidth = Math.max(48, Math.min(110, viewportColumns - 8));
   const imagePreviewModalHeight = Math.max(18, Math.min(36, viewportRows - 6));
   const imagePreviewModalLeft = Math.max(
@@ -6637,6 +7312,20 @@ export function App({
           viewportRows,
           fallbackLeft: viewportColumns - gitPopupWidth - POPUP_FALLBACK_RIGHT_OFFSET,
         })
+      : null;
+  const composerEnvPopupPosition =
+    overlayMenu === "composer-env"
+      ? {
+          top: Math.max(1, viewportRows - composerEnvPopupHeight - 2),
+          left: Math.max(1, mainPanelLeft + 4),
+        }
+      : null;
+  const composerBranchPopupPosition =
+    overlayMenu === "composer-branch"
+      ? {
+          top: Math.max(1, viewportRows - composerBranchPopupHeight - 2),
+          left: Math.max(mainPanelLeft + 4, viewportColumns - composerBranchPopupWidth - 4),
+        }
       : null;
 
   useEffect(() => {
@@ -8740,6 +9429,62 @@ export function App({
                       </>
                     )}
                   </box>
+                  {activeProjectId && isGitRepo ? (
+                    <box
+                      style={{
+                        position: "absolute",
+                        left: 1,
+                        right: 1,
+                        bottom: -1,
+                        zIndex: 30,
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        backgroundColor: "transparent",
+                        paddingLeft: 0,
+                        paddingRight: 0,
+                      }}
+                    >
+                      <box
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          backgroundColor: PALETTE.composerPanel,
+                          paddingLeft: 1,
+                          paddingRight: 1,
+                        }}
+                      >
+                        <ToolbarButton
+                          icon={effectiveThreadEnvMode === "worktree" ? "󰙅" : "󰉋"}
+                          label={effectiveThreadEnvMode === "worktree" ? "New worktree" : "Local"}
+                          compact
+                          chrome="bare"
+                          active={overlayMenu === "composer-env"}
+                          disabled={false}
+                          onPress={toggleComposerEnvMenu}
+                        />
+                      </box>
+                      <box
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          backgroundColor: PALETTE.composerPanel,
+                          paddingLeft: 1,
+                          paddingRight: 1,
+                        }}
+                      >
+                        <ToolbarButton
+                          icon="󰘬"
+                          label={truncateToolbarLabel(composerBranchLabel, 20)}
+                          compact
+                          chrome="bare"
+                          active={overlayMenu === "composer-branch"}
+                          disabled={!gitCwd || composerBranchMenuItems.length === 0}
+                          onPress={toggleComposerBranchMenu}
+                        />
+                      </box>
+                    </box>
+                  ) : null}
                 </box>
               </>
             )}
@@ -8900,6 +9645,91 @@ export function App({
               ))}
             </box>
           ) : null}
+        </box>
+      ) : null}
+
+      {overlayMenu === "composer-env" && composerEnvPopupPosition ? (
+        <box
+          style={{
+            position: "absolute",
+            top: composerEnvPopupPosition.top,
+            left: composerEnvPopupPosition.left,
+            width: composerEnvPopupWidth,
+            backgroundColor: PALETTE.popup,
+            paddingTop: 1,
+            paddingBottom: 1,
+            paddingLeft: 0,
+            paddingRight: 0,
+            zIndex: 200,
+            flexDirection: "column",
+          }}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation?.();
+          }}
+        >
+          {composerEnvMenuItems.map((item, index) => (
+            <PopupRow
+              key={`composer-env:${item.id}`}
+              icon={item.selected ? "󰄬" : item.icon}
+              label={item.label}
+              active={index === composerEnvMenuIndex}
+              onHover={() => setComposerEnvMenuIndex(index)}
+              onPress={item.onSelect}
+            />
+          ))}
+        </box>
+      ) : null}
+
+      {overlayMenu === "composer-branch" && composerBranchPopupPosition ? (
+        <box
+          style={{
+            position: "absolute",
+            top: composerBranchPopupPosition.top,
+            left: composerBranchPopupPosition.left,
+            width: composerBranchPopupWidth,
+            backgroundColor: PALETTE.popup,
+            paddingTop: 1,
+            paddingBottom: 1,
+            paddingLeft: 1,
+            paddingRight: 1,
+            zIndex: 200,
+            flexDirection: "column",
+          }}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation?.();
+          }}
+        >
+          {composerBranchMenuItems.length > 0 ? (
+            <scrollbox
+              ref={composerBranchScrollRef}
+              focused={focusArea === "controls"}
+              onMouseScroll={() => {
+                setFocusArea("controls");
+              }}
+              style={{
+                height: composerBranchVisibleRowCount,
+                minHeight: composerBranchVisibleRowCount,
+                ...themedScrollboxStyle(PALETTE.popup),
+              }}
+            >
+              {composerBranchMenuItems.map((item, index) => (
+                <PopupRow
+                  key={`composer-branch:${item.id}`}
+                  icon={item.selected ? "󰄬" : item.branch.isRemote ? "󰘬" : "󰊢"}
+                  label={truncateTitleForDisplay(item.label, 24)}
+                  active={index === composerBranchMenuIndex}
+                  {...(item.trailingLabel ? { trailingLabel: item.trailingLabel } : {})}
+                  onPress={() => {
+                    void selectComposerBranch(item);
+                  }}
+                />
+              ))}
+            </scrollbox>
+          ) : (
+            <text content="No branches found." style={{ fg: PALETTE.muted }} />
+          )}
         </box>
       ) : null}
 
