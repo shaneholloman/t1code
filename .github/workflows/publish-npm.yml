@@ -1,0 +1,73 @@
+name: Publish npm package
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - "apps/tui/**"
+      - "apps/server/**"
+      - "apps/web/**"
+      - "packages/**"
+      - "scripts/**"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/publish-npm.yml"
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check formatting
+        run: bun fmt:check
+
+      - name: Lint
+        run: bun lint
+
+      - name: Typecheck
+        run: bun typecheck
+
+      - name: Prepare dev publish version
+        if: github.ref_type == 'branch'
+        run: node scripts/prepare-tui-publish-version.mjs dev
+
+      - name: Verify tagged release version
+        if: github.ref_type == 'tag'
+        run: node scripts/prepare-tui-publish-version.mjs tag
+
+      - name: Publish dev dist-tag
+        if: github.ref_type == 'branch'
+        working-directory: apps/tui
+        run: npm publish --tag dev
+
+      - name: Publish latest release
+        if: github.ref_type == 'tag'
+        working-directory: apps/tui
+        run: npm publish
