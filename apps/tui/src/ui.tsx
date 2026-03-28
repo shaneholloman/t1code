@@ -1462,7 +1462,7 @@ export function MessageMarkdown({
       style={{
         width: fillWidth ? "100%" : "auto",
         minWidth: 0,
-        flexShrink: 1,
+        flexShrink: 0,
         fg: color,
         ...(fillWidth ? {} : { maxWidth: "100%" as const }),
       }}
@@ -8634,11 +8634,8 @@ export function App({
                   ))}
 
                   {timelineEntries.map((entry, index) => {
-                    const previousEntry = index > 0 ? timelineEntries[index - 1] : null;
-                    const startsAfterWork =
-                      entry.kind === "message" &&
-                      entry.message.role === "assistant" &&
-                      previousEntry?.kind === "work";
+                    const nextEntry =
+                      index < timelineEntries.length - 1 ? timelineEntries[index + 1] : null;
 
                     if (entry.kind === "message") {
                       const timestamp = formatMessageTimestamp(
@@ -8698,10 +8695,20 @@ export function App({
                                 ) : null}
                               </box>
                             </box>
-                            <text
-                              content={timestamp}
-                              style={{ fg: PALETTE.subtle, marginTop: 0 }}
-                            />
+                            <box
+                              style={{
+                                width: userMessageBubbleWidth,
+                                minWidth: 0,
+                                flexDirection: "row",
+                                justifyContent: "flex-end",
+                                flexShrink: 0,
+                              }}
+                            >
+                              <text
+                                content={timestamp}
+                                style={{ fg: PALETTE.subtle, marginTop: 0, flexShrink: 0 }}
+                              />
+                            </box>
                           </box>
                         );
                       }
@@ -8710,13 +8717,34 @@ export function App({
                         <box
                           key={entry.id}
                           style={{
-                            marginTop: startsAfterWork ? 1 : 0,
+                            width: "100%",
+                            marginTop: 0,
                             marginBottom: 1,
                             flexDirection: "column",
                           }}
                         >
-                          <MessageMarkdown content={renderMessageBody(entry)} />
-                          <text content={timestamp} style={{ fg: PALETTE.subtle }} />
+                          <box
+                            style={{
+                              width: "100%",
+                              minWidth: 0,
+                              flexDirection: "column",
+                            }}
+                          >
+                            <MessageMarkdown content={renderMessageBody(entry)} />
+                          </box>
+                          <box
+                            style={{
+                              width: "100%",
+                              minWidth: 0,
+                              flexDirection: "row",
+                              flexShrink: 0,
+                            }}
+                          >
+                            <text
+                              content={timestamp}
+                              style={{ fg: PALETTE.subtle, flexShrink: 0 }}
+                            />
+                          </box>
                         </box>
                       );
                     }
@@ -8749,7 +8777,8 @@ export function App({
                         key={entry.id}
                         style={{
                           backgroundColor: PALETTE.surface,
-                          marginBottom: 0,
+                          marginTop: 0,
+                          marginBottom: nextEntry?.kind === "work" ? 0 : 1,
                           maxWidth: "88%",
                           paddingTop: 0,
                           paddingBottom: 0,
@@ -8801,6 +8830,7 @@ export function App({
                           key={`pending-send-${entry.messageId}`}
                           style={{
                             width: "100%",
+                            marginTop: 1,
                             marginBottom: 1,
                             flexDirection: "column",
                             alignItems: "flex-end",
