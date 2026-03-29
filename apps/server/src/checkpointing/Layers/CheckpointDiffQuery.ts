@@ -3,10 +3,12 @@ import {
   type OrchestrationGetFullThreadDiffInput,
   type OrchestrationGetFullThreadDiffResult,
   type OrchestrationGetTurnDiffResult as OrchestrationGetTurnDiffResultType,
+  type ThreadId,
 } from "@t3tools/contracts";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Layer, Option, Schema } from "effect";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointInvariantError, CheckpointUnavailableError } from "../Errors.ts";
 import { checkpointRefForThreadTurn, resolveThreadWorkspaceCwd } from "../Utils.ts";
 import { CheckpointStore } from "../Services/CheckpointStore.ts";
@@ -20,6 +22,18 @@ const isTurnDiffResult = Schema.is(OrchestrationGetTurnDiffResult);
 const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const checkpointStore = yield* CheckpointStore;
+  const providerService = yield* ProviderService;
+
+  const resolveSessionRuntimeForThread = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+  ): Effect.fn.Return<Option.Option<{ readonly threadId: ThreadId; readonly cwd: string }>> {
+    const sessions = yield* providerService.listSessions();
+    const session = sessions.find((entry) => entry.threadId === threadId);
+    if (!session?.cwd) {
+      return Option.none();
+    }
+    return Option.some({ threadId: session.threadId, cwd: session.cwd });
+  });
 
   const getTurnDiff: CheckpointDiffQueryShape["getTurnDiff"] = (input) =>
     Effect.gen(function* () {
@@ -62,10 +76,16 @@ const make = Effect.gen(function* () {
         });
       }
 
-      const workspaceCwd = resolveThreadWorkspaceCwd({
-        thread,
-        projects: snapshot.projects,
-      });
+      const sessionRuntime = yield* resolveSessionRuntimeForThread(input.threadId);
+      const workspaceCwd =
+        Option.match(sessionRuntime, {
+          onNone: () => undefined,
+          onSome: (runtime) => runtime.cwd,
+        }) ??
+        resolveThreadWorkspaceCwd({
+          thread,
+          projects: snapshot.projects,
+        });
       if (!workspaceCwd) {
         return yield* new CheckpointInvariantError({
           operation,

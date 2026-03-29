@@ -6,10 +6,14 @@ import {
   TurnId,
   type OrchestrationReadModel,
 } from "@t3tools/contracts";
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  ProviderService,
+  type ProviderServiceShape,
+} from "../../provider/Services/ProviderService.ts";
 import { checkpointRefForThreadTurn } from "../Utils.ts";
 import { CheckpointDiffQueryLive } from "./CheckpointDiffQuery.ts";
 import { CheckpointStore, type CheckpointStoreShape } from "../Services/CheckpointStore.ts";
@@ -80,6 +84,32 @@ function makeSnapshot(input: {
 }
 
 describe("CheckpointDiffQueryLive", () => {
+  const makeProviderService = (
+    sessions: ReadonlyArray<{ readonly threadId: ThreadId; readonly cwd?: string }>,
+  ): ProviderServiceShape => ({
+    startSession: () => Effect.die("not implemented"),
+    sendTurn: () => Effect.die("not implemented"),
+    interruptTurn: () => Effect.die("not implemented"),
+    respondToRequest: () => Effect.die("not implemented"),
+    respondToUserInput: () => Effect.die("not implemented"),
+    stopSession: () => Effect.die("not implemented"),
+    listSessions: () =>
+      Effect.succeed(
+        sessions.map((session) => ({
+          provider: "codex" as const,
+          status: "ready" as const,
+          runtimeMode: "full-access" as const,
+          threadId: session.threadId,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          ...(session.cwd ? { cwd: session.cwd } : {}),
+        })),
+      ),
+    getCapabilities: () => Effect.die("not implemented"),
+    rollbackConversation: () => Effect.die("not implemented"),
+    streamEvents: Stream.empty,
+  });
+
   it("computes diffs using canonical turn-0 checkpoint refs", async () => {
     const projectId = ProjectId.makeUnsafe("project-1");
     const threadId = ThreadId.makeUnsafe("thread-1");
@@ -119,6 +149,7 @@ describe("CheckpointDiffQueryLive", () => {
 
     const layer = CheckpointDiffQueryLive.pipe(
       Layer.provideMerge(Layer.succeed(CheckpointStore, checkpointStore)),
+      Layer.provideMerge(Layer.succeed(ProviderService, makeProviderService([]))),
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
           getSnapshot: () => Effect.succeed(snapshot),
@@ -154,6 +185,72 @@ describe("CheckpointDiffQueryLive", () => {
     });
   });
 
+  it("prefers the active provider session cwd for worktree diffs", async () => {
+    const projectId = ProjectId.makeUnsafe("project-session");
+    const threadId = ThreadId.makeUnsafe("thread-session");
+    const toCheckpointRef = checkpointRefForThreadTurn(threadId, 1);
+    const diffCheckpointsCalls: Array<{
+      readonly fromCheckpointRef: CheckpointRef;
+      readonly toCheckpointRef: CheckpointRef;
+      readonly cwd: string;
+    }> = [];
+
+    const snapshot = makeSnapshot({
+      projectId,
+      threadId,
+      workspaceRoot: "/tmp/root-workspace",
+      worktreePath: "/tmp/stale-worktree-path",
+      checkpointTurnCount: 1,
+      checkpointRef: toCheckpointRef,
+    });
+
+    const checkpointStore: CheckpointStoreShape = {
+      isGitRepository: () => Effect.succeed(true),
+      captureCheckpoint: () => Effect.void,
+      hasCheckpointRef: () => Effect.succeed(true),
+      restoreCheckpoint: () => Effect.succeed(true),
+      diffCheckpoints: ({ fromCheckpointRef, toCheckpointRef, cwd }) =>
+        Effect.sync(() => {
+          diffCheckpointsCalls.push({ fromCheckpointRef, toCheckpointRef, cwd });
+          return "diff patch";
+        }),
+      deleteCheckpointRefs: () => Effect.void,
+    };
+
+    const layer = CheckpointDiffQueryLive.pipe(
+      Layer.provideMerge(Layer.succeed(CheckpointStore, checkpointStore)),
+      Layer.provideMerge(
+        Layer.succeed(
+          ProviderService,
+          makeProviderService([{ threadId, cwd: "/tmp/live-worktree-session" }]),
+        ),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(ProjectionSnapshotQuery, {
+          getSnapshot: () => Effect.succeed(snapshot),
+        }),
+      ),
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const query = yield* CheckpointDiffQuery;
+        return yield* query.getFullThreadDiff({
+          threadId,
+          toTurnCount: 1,
+        });
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(diffCheckpointsCalls).toEqual([
+      {
+        cwd: "/tmp/live-worktree-session",
+        fromCheckpointRef: checkpointRefForThreadTurn(threadId, 0),
+        toCheckpointRef,
+      },
+    ]);
+  });
+
   it("fails when the thread is missing from the snapshot", async () => {
     const threadId = ThreadId.makeUnsafe("thread-missing");
 
@@ -168,6 +265,7 @@ describe("CheckpointDiffQueryLive", () => {
 
     const layer = CheckpointDiffQueryLive.pipe(
       Layer.provideMerge(Layer.succeed(CheckpointStore, checkpointStore)),
+      Layer.provideMerge(Layer.succeed(ProviderService, makeProviderService([]))),
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
           getSnapshot: () =>
