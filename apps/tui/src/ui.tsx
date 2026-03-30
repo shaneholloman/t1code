@@ -257,6 +257,7 @@ const SIDEBAR_THREAD_SORT_LABELS: Record<SidebarThreadSortOrder, string> = {
   updated_at: "Last user message",
   created_at: "Created at",
 };
+const SELECTION_COPY_TOAST_MESSAGE = "Copied to clipboard";
 
 type ComposerPathTrigger = {
   query: string;
@@ -2564,6 +2565,29 @@ function SettingsRow(props: {
   );
 }
 
+function SelectionCopyToast(props: { message: string }) {
+  return (
+    <box
+      style={{
+        position: "absolute",
+        top: 1,
+        right: 2,
+        zIndex: 60,
+        backgroundColor: PALETTE.popup,
+        paddingLeft: 1,
+        paddingRight: 1,
+        paddingTop: 1,
+        paddingBottom: 1,
+        flexDirection: "row",
+        alignItems: "center",
+      }}
+    >
+      <text content="󰆏" style={{ fg: PALETTE.text, marginRight: 1 }} />
+      <text content={props.message} style={{ fg: PALETTE.text }} />
+    </box>
+  );
+}
+
 function SettingResetButton(props: { onPress: () => void }) {
   const [hovered, setHovered] = useState(false);
 
@@ -2673,6 +2697,7 @@ export function App({
   const [snapshot, setSnapshot] = useState<OrchestrationReadModel | null>(null);
   const [serverConfig, setServerConfig] = useState<TuiServerConfig>(null);
   const [, setStatus] = useState("Booting");
+  const [selectionCopyToast, setSelectionCopyToast] = useState<string | null>(null);
   const [startupIssue, setStartupIssue] = useState<string | null>(null);
   const [mainView, setMainView] = useState<MainView>("thread");
   const [composer, setComposer] = useState("");
@@ -7541,13 +7566,28 @@ export function App({
         }
       : null;
 
+  useEffect(() => {
+    if (!selectionCopyToast) return;
+    const timeout = setTimeout(() => {
+      setSelectionCopyToast((current) => (current === selectionCopyToast ? null : current));
+    }, 1200);
+    return () => {
+      clearTimeout(timeout);
+    };
+  }, [selectionCopyToast]);
+
+  const showSelectionCopyToast = useCallback(() => {
+    setSelectionCopyToast(SELECTION_COPY_TOAST_MESSAGE);
+  }, []);
+
   const copyRendererSelection = useCallback(() => {
     const selectedText = terminalRenderer.getSelection?.()?.getSelectedText().trim();
     if (!selectedText) return false;
     void copyToClipboard(selectedText, "Copied to clipboard");
     terminalRenderer.clearSelection?.();
+    showSelectionCopyToast();
     return true;
-  }, [copyToClipboard, terminalRenderer]);
+  }, [copyToClipboard, showSelectionCopyToast, terminalRenderer]);
 
   useEffect(() => {
     const terminalConsole = terminalRenderer.console;
@@ -7557,11 +7597,12 @@ export function App({
       if (!value.trim()) return;
       void copyToClipboard(value, "Copied to clipboard");
       terminalRenderer.clearSelection?.();
+      showSelectionCopyToast();
     };
     return () => {
       terminalConsole.onCopySelection = previousHandler;
     };
-  }, [copyToClipboard, terminalRenderer]);
+  }, [copyToClipboard, showSelectionCopyToast, terminalRenderer]);
 
   useEffect(() => {
     if (imagePreview?.status !== "ready" || !imagePreview.filePath) {
@@ -8090,6 +8131,10 @@ export function App({
               minHeight: 0,
             }}
           >
+            {mainView === "thread" && selectionCopyToast ? (
+              <SelectionCopyToast message={selectionCopyToast} />
+            ) : null}
+
             {mainView !== "thread" ? (
               <scrollbox
                 focused={focusArea === "settings"}
